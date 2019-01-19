@@ -22,6 +22,7 @@
 #include <Adafruit_NeoPixel.h>
 #include "esp8266pzem.h"
 
+#include <math.h>
 
 // select which pin will trigger the configuration portal when set to LOW
 
@@ -188,7 +189,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 void mqttConnect() {
-  Serial.println("Checking MQTT connexion : " + String(client.connected()));
+  //Serial.println("Checking MQTT connexion : " + String(client.connected()));
   while (!client.connected()) {
     Serial.print("Connecting to MQTT server...");
     if (client.connect("node131", mqttUser, mqttPassword)) {
@@ -202,11 +203,12 @@ void mqttConnect() {
 
 }
 
-void mqttSend(int sensor, char unit, float value) {
-  String topic = "sensor/energy" + String(sensor) + "/" + String(unit);
+void mqttSend(const char* category, int sensor, char unit, float value) {
+  mqttConnect();
+  String topic = String(device_name) + "/sensor/" + String(category) + String(sensor) + "/" + String(unit);
   client.publish(topic.c_str(), String(value, 2).c_str(), false); 
   if ( debug ) {
-    String msg   = "sensor " + String(sensor) + ": " + String(value, 2) + String(unit);
+    String msg   = "MQTT " + String(topic) + ": " + String(value, 2) + String(unit);
     Serial.println(msg);
   }
 }
@@ -247,7 +249,7 @@ float sendMeasures(int sensor) {
   for (i = 0; i < strlen(units); i++) {
     unit = units[i];
     measure = getMeasure(unit);
-    mqttSend(sensor, unit, measure);
+    mqttSend("energy", sensor, unit, measure);
     if (unit == 'W') {
       wattReturn = measure;
     }
@@ -274,6 +276,50 @@ void selectDevice(int channel) {
     delay(150);
 }
 
+//------------------------ T E M P E R A T U R E   --------------------------------------
+
+int analogRead() {
+  int analogData = 0;
+
+  for(int i = 0; i < 10; i++) {
+    analogData += analogRead(A0);
+    delay(50);
+  }
+
+  analogData = analogData / 10;
+  return analogData;
+}
+
+float getTemperature() {
+  
+  int     R0 = 10000;         // Thermistor resistance at room temp  ????????????????????
+  int     Rs = 110000;        // Bridge 2nd resistor ????????????????????
+  int     T0_deg = 25;        // Room Temp
+  int     T0_Coeff = 3950;    // Thermistor coefficient at room temp
+  float   K = 273.15;         // Kelvin convertion
+  //float   Vcc = 3.3;
+  float   Va;                 // Analog Volt reading
+  float   Rfactor;            // Steinhart formula Value
+  float   RBase;            // Steinhart formula Value
+  float   steinhart;          // Steinhart formula Value
+  float   T;                  // Temperature
+  float   R;                  // Thermistor resistance
+  char    unit = 'C';         // MQTT unit
+
+  Va = (float) analogRead();
+  R = (Va * Rs) / (1023 - Va);
+
+  Rfactor = R/R0;
+  RBase =  (1/(K+T0_deg));
+  steinhart = 1/(log(Rfactor) / T0_Coeff + RBase); 
+
+  T = steinhart - K;   
+  mqttSend("temp", 0, unit, T);
+
+  return T; 
+
+}
+
 //------------------------ N E O   P I X E L  --------------------------------------
 Rgb convertToRgb(float watt) {
 
@@ -284,7 +330,6 @@ Rgb convertToRgb(float watt) {
 
   int iWatt;
 
-Serial.println("Watt  " + String(watt));   
 
   iWatt = (int) (watt); 
 
@@ -292,8 +337,6 @@ Serial.println("Watt  " + String(watt));
   if (iWatt > 418) {iWatt = (iWatt + 418) / 2;}   // 1000 -> 512
   if (iWatt > 912) {iWatt = (iWatt + 912) / 2;}   // 3500 -> 1024
   if (iWatt > 1224) {iWatt = (iWatt + 1224) / 2;} // 6000 -> 1280
-
-Serial.println("iWatt  " + String(iWatt));   
 
   red   = 30;
   green = 30;
@@ -389,6 +432,7 @@ void loop() {
 
   int   sensor;
   float actualWatt;
+  float boardTemp;
   Rgb   color;
  
   for (sensor = 0; sensor < PZEM004T_COUNT; sensor++) {
@@ -399,15 +443,16 @@ void loop() {
     //digitalWrite(ADDRESS_PIN2,(sensor & 2))
     //digitalWrite(ADDRESS_PIN3,(sensor & 4))
 
-    mqttConnect();
     actualWatt = sendMeasures(sensor);
     client.loop();
     client.disconnect();
     color = convertToRgb(actualWatt);
     setColor(sensor, color);
     strip.show();
+    boardTemp = getTemperature();
     delay(1000);
   }
+  
   // is configuration portal requested?
   if ( digitalRead(TRIGGER_PIN) == LOW ) {
     digitalWrite(LED_BUILTIN, LOW);  
