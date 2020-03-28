@@ -34,6 +34,7 @@ const char*   mqttPassword = "";
 //-------------------------------------------------------------------
 PZEM004T pzem(PZEM004T_RX_PIN,PZEM004T_TX_PIN);  // RX,TX (D2, D1) on NodeMCU
 IPAddress ip(192,168,1,1); // required by pzem but not used
+
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(PZEM004T_COUNT, LED_PIN, NEO_RGB + NEO_KHZ800);
 
 //httpClient  http;
@@ -113,7 +114,8 @@ boolean readConfig() {
 
 //------------------------ S E T U P --------------------------------------
 void setup() {
-  Serial.begin(115200);
+  //Serial.begin(115200);
+  Serial.begin(9600);
   Serial.println("Starting setup");
   
   pinMode(LED_BUILTIN, OUTPUT);                                           // set led pin as output
@@ -218,8 +220,10 @@ void mqttSend(const char* category, int sensor, char unit, float value) {
 float getMeasure(char unit) {
   int i = 0;
   float r = -1.0;
+  //delay(50);
   do {
-    switch (unit) {
+     Serial.println("pzem reading " + String(unit) + " attempt " + String(i));
+     switch (unit) {
       case 'V':
         r = pzem.voltage(ip);
         break;
@@ -233,7 +237,7 @@ float getMeasure(char unit) {
         r = pzem.energy(ip);
         break;
     }
-    wdt_reset();
+    //wdt_reset(); reset du watchdog
     i++;
   } while ( i < MAX_ATTEMPTS && r < 0.0);
   return r;
@@ -241,11 +245,14 @@ float getMeasure(char unit) {
 
 float sendMeasures(int sensor) {
   int   i;
-  char  units[] = "VAWE";
+//  char  units[] = "VAWE";
+  char  units[] = "VAW";
   char  unit;
   float measure;
   float wattReturn;
 
+  Serial.println("selecting pzem " + String(sensor));
+ 
   for (i = 0; i < strlen(units); i++) {
     unit = units[i];
     measure = getMeasure(unit);
@@ -273,7 +280,7 @@ void selectDevice(int channel) {
     } else {
       digitalWrite(ADDRESS_PIN3,LOW);
     }
-    delay(150);
+    delay(50);
 }
 
 //------------------------ T E M P E R A T U R E   --------------------------------------
@@ -411,17 +418,18 @@ void initLed() {
   strip.setBrightness(10);
 
   for (led = 0; led < PZEM004T_COUNT; led++) {
+    selectDevice(led);
+    pzem.setAddress(ip);
     setColor(led, color);
     delay(150);
     strip.show();
     Serial.println("init led " + String(led));   
-
   }
 
   for (bright = 10; bright <= LED_BRIGHTNESS; bright+=10) {
     strip.setBrightness(bright);
     strip.show();
-    delay(150);
+    delay(50);
   }
   
 }
@@ -450,7 +458,7 @@ void loop() {
     setColor(sensor, color);
     strip.show();
     boardTemp = getTemperature();
-    delay(1000);
+    //delay(100);
   }
   
   // is configuration portal requested?
