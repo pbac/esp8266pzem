@@ -1,9 +1,24 @@
+#define VERSION "1.2.4"
+
+#define DEBUG 
+
+#ifdef DEBUG
+#define isDebug     1
+#define debug(x)    Serial.print(x)
+#define debugln(x)  Serial.println(x)
+#else
+#define isDebug     0
+#define debug(x)    {}
+#define debugln(x)  {}
+#endif
 
 
 #ifndef esp8266pzem_h
 #define esp8266pzem_h
 #endif
 
+
+#define LED_BUILTIN       16
 #define ADDRESS_PIN1      12
 #define ADDRESS_PIN2      13
 #define ADDRESS_PIN3      15
