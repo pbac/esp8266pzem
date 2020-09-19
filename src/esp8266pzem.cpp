@@ -1,13 +1,8 @@
-#include <FS.h>                   //this needs to be first, or it all crashes and burns...
+
+#include <Arduino.h>
 
 #include <ESP8266WiFi.h>          // ESP8266 Core WiFi Library (you most likely already have this in your sketch)
 
-#include <DNSServer.h>            // Local DNS Server used for redirecting all requests to the configuration portal
-#include <WiFiManager.h>          // https://github.com/tzapu/WiFiManager WiFi Configuration Magic
-
-#include <ArduinoJson.h>          //https://github.com/bblanchon/ArduinoJson
-
-//#include <ESP8266httpClient.h>
 #include <SoftwareSerial.h>
 #include <PZEM004T.h>             // https://github.com/olehs/PZEM004T Power Meter
 #include <PubSubClient.h>
@@ -43,79 +38,23 @@ PubSubClient    mqttCnx(wifiCnx);
 bool led    = false;
 char mqttBuffer[100];
 
-//------------------------ S E T U P --------------------------------------
-void setup() {
-    // SERIAL
-    Serial.begin(115200);
-    debugln("Starting setup");
 
-    //PIN
-    pinMode(LED_BUILTIN, OUTPUT);                                           // set led pin as output
-	pinMode(ADDRESS_PIN1, OUTPUT);
-	pinMode(ADDRESS_PIN2, OUTPUT);
-	pinMode(ADDRESS_PIN3, OUTPUT);
-	digitalWrite(LED_BUILTIN, LOW);                                          // keep LED off
-
-    // WIFI Connection
-    WiFi.begin(ssid, password);         
-    debug(VERSION);
-    debug(" Connecting to ");
-    debug(ssid); 
-    debugln(" ...");
-
-    int i = 0;
-    while (WiFi.status() != WL_CONNECTED) { // Wait for the Wi-Fi to connect
-        delay(100);
-        debug(++i); 
-        debug(' ');
-    }
-    // Local IP Copy
-    String sLocalIp = String() + WiFi.localIP()[0] + "." + WiFi.localIP()[1] + "." + WiFi.localIP()[2] + "." + WiFi.localIP()[3];
-    strcpy(localIp,sLocalIp.c_str());
-
-    debugln('\n');
-    debugln("Connection established!");  
-    debug("IP address:\t");
-    debugln(localIp);         
-
-	// Multiplexer
-	debugln("initiating multiplexer to 0 ");   
-	selectDevice(0);
-
-	//PZEM
-	debugln("setting pzem ip to " + String(ip));   
-	pzem.setAddress(ip);
-	delay(1000);
-
-	//MQTT
-    debugln("setting mqtt server to " + String(mqttServer));   
-    mqttCnx.setServer(mqttServer, 1883);                                      //Configuring MQTT server
-    mqttCnx.setCallback(mqttCallback);                                        //La fonction de callback qui est executée à chaque réception de message  
-    mqttCnx.disconnect();
-    mqttConnect();
-    mqttSend("IP", "started", localIp);										  // Send the IP address of the ESP8266 to the computer
-								
-	strip.begin();
-	strip.show(); // Initialize all pixels to 'off'                             
-	initLed();
-	strip.setBrightness(LED_BRIGHTNESS);
-
-
-}
-
-//------------------------ M Q T T --------------------------------------
+/////////////////////////////////////////////////////////////////////////////////////////////////
+//------------------------  M Q T T   C O N N E C T I O N  --------------------------------------
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
-    int i;
-    debugln("MQTT Message =>  topic: " + String(topic));
-    debug(" | length: " + String(length,DEC));
+    unsigned int    i;
+
+    debugln("Message recu =>  topic: " + String(topic));
+    debug(" | longueur: " + String(length,DEC));
 
     for(i=0; i<length; i++) {                                                   // create character buffer with ending null terminator (string)
         mqttBuffer[i] = payload[i];
     }
     mqttBuffer[i] = '\0';
 
-    debugln(" payload: " + String(mqttBuffer));
+    String msgString = String(mqttBuffer);
+    debugln("Payload: " + msgString);
 }
 
 void mqttConnect() {
@@ -124,19 +63,11 @@ void mqttConnect() {
         if (mqttCnx.connect(deviceName, mqttUser, mqttPassword)) {
             debugln("MQTT connexion OK");
         } else {
-            Serial.println("MQTT Connexion failed with state : " + mqttCnx.state());
+            debug("MQTT Connexion failed with state ");
+            debug(mqttCnx.state());
             delay(1000);
         }
     }
-
-}
-
-
-void mqttSendValue(char* category, int sensor, char unit, float value) {
-	char aValue[32];
-	sprintf(aValue, "%.2f", value);
-	String cCategory = String(category) + String(sensor);
-	mqttSend(cCategory.c_str(), String(unit).c_str(), aValue);
 }
 
 void mqttSend(const char* category, const char* label, char* value) {
@@ -148,6 +79,12 @@ void mqttSend(const char* category, const char* label, char* value) {
     debugln("MQTT " + String(topic) + ": " + String(value));
 }
 
+void mqttSendValue(char* category, int sensor, char unit, float value) {
+	char aValue[32];
+	sprintf(aValue, "%.2f", value);
+	String cCategory = String(category) + String(sensor);
+	mqttSend(cCategory.c_str(), String(unit).c_str(), aValue);
+}
 
 
 //------------------------ P Z E M  --------------------------------------
@@ -178,10 +115,10 @@ float getMeasure(char unit) {
 }
 
 float sendMeasures(int sensor, char * units) {
-	int   i;
-	char  unit;
-	float measure;
-	float wattReturn;
+	unsigned int   	i;
+	char  			unit;
+	float 			measure;
+	float 			wattReturn	 = 0;
 
 	debugln("reading pzem #" + String(sensor));
 
@@ -243,7 +180,6 @@ float getTemperature(int analogData) {
   float   steinhart;          // Steinhart formula Value
   float   T;                  // Temperature
   float   R;                  // Thermistor resistance
-  char    unit = 'C';         // MQTT unit
 
   Va = (float) analogData;
   R = (Va * Rs) / (1023 - Va);
@@ -366,6 +302,71 @@ void initLed() {
 		delay(50);
 	}
   
+}
+
+//------------------------ S E T U P --------------------------------------
+void setup() {
+
+    int     i = 0;
+
+    // SERIAL
+    Serial.begin(115200);
+    debugln("Starting setup");
+
+    //PIN
+    pinMode(LED_BUILTIN, OUTPUT);                                           // set led pin as output
+	pinMode(ADDRESS_PIN1, OUTPUT);
+	pinMode(ADDRESS_PIN2, OUTPUT);
+	pinMode(ADDRESS_PIN3, OUTPUT);
+	digitalWrite(LED_BUILTIN, LOW);                                          // keep LED off
+
+    // WIFI Connection
+    WiFi.begin(ssid, password);             // Connect to the network
+    debug(VERSION);
+    debug(" Connecting to ");
+    debug(ssid); 
+    debugln(" ...");
+
+    while (WiFi.status() != WL_CONNECTED) { // Wait (4min max) for the Wi-Fi to connect
+        delay(500);
+        debug(++i); 
+        debug(' ');
+        if (i > 500) {                      // Reboot if no wifi connection 
+            ESP.reset();
+        }
+    }
+
+
+    // Local IP Copy
+    String sLocalIp = String() + WiFi.localIP()[0] + "." + WiFi.localIP()[1] + "." + WiFi.localIP()[2] + "." + WiFi.localIP()[3];
+    strcpy(localIp,sLocalIp.c_str());
+
+    debugln('\n');
+    debugln("Connection established!");  
+    debug("IP address:\t");
+    debugln(localIp);         
+
+	// Multiplexer
+	debugln("initiating multiplexer to 0 ");   
+	selectDevice(0);
+
+	//PZEM
+	pzem.setAddress(ip);
+	delay(1000);
+
+	//MQTT
+    debugln("setting mqtt server to " + String(mqttServer));   
+    mqttCnx.setServer(mqttServer, 1883);                                      //Configuring MQTT server
+    mqttCnx.setCallback(mqttCallback);                                        //La fonction de callback qui est executée à chaque réception de message  
+    mqttCnx.disconnect();
+    mqttConnect();
+    mqttSend("IP", "started", localIp);										  // Send the IP address of the ESP8266 to the computer
+								
+	strip.begin();
+	strip.show(); // Initialize all pixels to 'off'                             
+	initLed();
+	strip.setBrightness(LED_BRIGHTNESS);
+
 }
 
 //------------------------ L O O P --------------------------------------
