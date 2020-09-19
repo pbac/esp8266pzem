@@ -76,7 +76,7 @@ void setup() {
     debugln('\n');
     debugln("Connection established!");  
     debug("IP address:\t");
-    debugln(localIp);         // Send the IP address of the ESP8266 to the computer
+    debugln(localIp);         
 
 	// Multiplexer
 	debugln("initiating multiplexer to 0 ");   
@@ -89,11 +89,11 @@ void setup() {
 
 	//MQTT
     debugln("setting mqtt server to " + String(mqttServer));   
-    mqttCnx.setServer(mqttServer, 1883);                                      //Configuration de la connexion au serveur MQTT
+    mqttCnx.setServer(mqttServer, 1883);                                      //Configuring MQTT server
     mqttCnx.setCallback(mqttCallback);                                        //La fonction de callback qui est executée à chaque réception de message  
     mqttCnx.disconnect();
     mqttConnect();
-    mqttSend("IP", "started", localIp);
+    mqttSend("IP", "started", localIp);										  // Send the IP address of the ESP8266 to the computer
 								
 	strip.begin();
 	strip.show(); // Initialize all pixels to 'off'                             
