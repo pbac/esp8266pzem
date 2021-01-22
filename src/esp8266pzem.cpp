@@ -1,96 +1,151 @@
 
 #include <Arduino.h>
-
-#include <ESP8266WiFi.h>          // ESP8266 Core WiFi Library (you most likely already have this in your sketch)
-
-#include <SoftwareSerial.h>
-#include <PZEM004T.h>             // https://github.com/olehs/PZEM004T Power Meter
+#include <ESP8266WiFi.h>
 #include <PubSubClient.h>
+#include <SoftwareSerial.h>
+#include <PZEM004T.h>			// https://github.com/olehs/PZEM004T Power Meter
 #include <Adafruit_NeoPixel.h>
 #include <math.h>
 
-#include "esp8266pzem.h"
-#include "secret.h"                // Store all private info (SECRET_*)
+#include "main.h"
+#include "secret.h"
+#include "mqtt54.h"
+ 
+#define		DEVICE_TYPE			"node"
+#define		DEVICE_ID			"131"
+#define		VERSION				"2.2.5"
 
-// WIFI connection
-const char*     ssid            = SECRET_WIFI_SSID;            // The SSID (name) of the Wi-Fi network you want to connect to
-const char*     password        = SECRET_WIFI_PASSWORD;       // The password of the Wi-Fi network
-char            localIp[20];
+#define		LED_BUILTIN			16
+#define		ADDRESS_PIN1		12
+#define		ADDRESS_PIN2		13
+#define		ADDRESS_PIN3		15
+#define		LED_PIN				14	//WS2812 led
+#define		PZEM004T_RX_PIN		4
+#define		PZEM004T_TX_PIN		5
 
-// MQTT server connection
-const char*     mqttServer      = SECRET_MQTT_SERVERNAME;
-const int       mqttPort        = 1883;
-const char*     mqttUser        = SECRET_MQTT_USER;
-const char*     mqttPassword    = SECRET_MQTT_PASSWORD;
-const char*     deviceName      = "node131";
+#define		TRIGGER_PIN			0
+#define		MAX_ATTEMPTS		3
+#define		PZEM004T_COUNT		8	//Total PZEM004 & Leds
+#define		LED_BRIGHTNESS		100
+#define		WATT_AVG			10
+#define		VOLT_AVG			20
+#define		TEMP_AVG			30
+#define		WATT_PRECISION		0
+#define		VOLT_PRECISION		1
+#define		TEMP_PRECISION		1
+
 
 //-------------------------------------------------------------------
 
-PZEM004T pzem(PZEM004T_RX_PIN,PZEM004T_TX_PIN);  // RX,TX (D2, D1) on NodeMCU
-IPAddress ip(192,168,1,1); // required by pzem but not used
+struct Rgb {
+  byte r;
+  byte g;
+  byte b;
+};
+
+struct MeasureCache {
+  byte		count;
+  float	measure;
+  float	sum;
+};
+
+MeasureCache	watt[PZEM004T_COUNT];
+MeasureCache	volt;
+MeasureCache	temp;
+
+//-------------------------------------------------------------------
+
+PZEM004T 		pzem(PZEM004T_RX_PIN,PZEM004T_TX_PIN);  // RX,TX (D2, D1) on NodeMCU
+IPAddress 		ip(192,168,1,1); // required by pzem but not used
 
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(PZEM004T_COUNT, LED_PIN, NEO_RGB + NEO_KHZ800);
 
-WiFiClient      wifiCnx;
-PubSubClient    mqttCnx(wifiCnx);
+WiFiClient		wifiCnx;
+Mqtt54			mqttCnx(wifiCnx, SECRET_MQTT_SERVERNAME, SECRET_MQTT_PORT, SECRET_MQTT_USER, SECRET_MQTT_PASSWORD);
 
-//-------------------------------------------------------------------
-bool led    = false;
-char mqttBuffer[100];
+//_______________________________________________________________________________________________________
+//_______________________________________________________________________________________________________
 
+void flashLed () {
+	static bool	builtIn_led = 0;		// For flashing the ESP led
 
-/////////////////////////////////////////////////////////////////////////////////////////////////
-//------------------------  M Q T T   C O N N E C T I O N  --------------------------------------
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-
-    unsigned int    i;
-
-    debugln("Message recu =>  topic: " + String(topic));
-    debug(" | longueur: " + String(length,DEC));
-
-    for(i=0; i<length; i++) {                                                   // create character buffer with ending null terminator (string)
-        mqttBuffer[i] = payload[i];
-    }
-    mqttBuffer[i] = '\0';
-
-    String msgString = String(mqttBuffer);
-    debugln("Payload: " + msgString);
+	builtIn_led = !builtIn_led;
+	digitalWrite(LED_BUILTIN, builtIn_led);
+}
+void flashLed (bool	builtIn_led) {
+	digitalWrite(LED_BUILTIN, builtIn_led);
 }
 
-void mqttConnect() {
+//___________________________________  W I F I   C O N N E C T I O N  ___________________________________
+//_______________________________________________________________________________________________________
 
-    while (!mqttCnx.connected()) {
-        if (mqttCnx.connect(deviceName, mqttUser, mqttPassword)) {
-            debugln("MQTT connexion OK");
-        } else {
-            debug("MQTT Connexion failed with state ");
-            debug(mqttCnx.state());
-            delay(1000);
-        }
-    }
+int wifiConnection(const char * Ssid, const char * Password, const char * Hostname) {
+	int		cnxWait = 0;
+
+	flashLed(1);
+	WiFi.mode(WIFI_STA);											// Set atation mode only (not AP)
+	delay(150);
+	//WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);			// Reset all address
+	delay(150);
+	WiFi.hostname(Hostname);										// Set the hostname (for dhcp server)
+	delay(150);
+	WiFi.begin(Ssid, Password);										// Connect to the network
+	debug(String() + Hostname + " connecting to " + Ssid + "... "); 
+
+	while (WiFi.status() != WL_CONNECTED) {						// Wait (4min max) for the Wi-Fi to connect
+		delay(500);
+		debug(String(++cnxWait) + "."); 
+		if (cnxWait > 500) {ESP.restart();}							// Reboot if no wifi connection 
+	}
+	flashLed(0);
+	debugln();
+	debugln(String() + "IP address  :\t" + WiFi.localIP()[0] + "." + WiFi.localIP()[1] + "." + WiFi.localIP()[2] + "." + WiFi.localIP()[3]);
+	return cnxWait;
 }
 
-void mqttSend(const char* category, const char* label, char* value) {
+//------------------------ T E M P E R A T U R E   --------------------------------------
 
-    mqttConnect();
-    String topic = String(deviceName) + "/sensor/" + String(category) + "/" + String(label);
-    mqttCnx.publish(topic.c_str(), String(value).c_str(), false); 
+int getAnalogReading(int samples) {
+	int 	analogData = 0;
 
-    debugln("MQTT " + String(topic) + ": " + String(value));
+	for(int i = 0; i < samples; i++) {
+		analogData += analogRead(A0);
+		delay(10);
+	}
+
+	analogData = analogData / samples;
+	return analogData;
 }
 
-void mqttSendValue(char* category, int sensor, char unit, float value) {
-	char aValue[32];
-	sprintf(aValue, "%.2f", value);
-	String cCategory = String(category) + String(sensor);
-	mqttSend(cCategory.c_str(), String(unit).c_str(), aValue);
-}
+float getTemperature(int analogData) {
+  
+	int		R0 = 10000;			// Thermistor resistance at room temp  ????????????????????
+	int		Rs = 110000;		// Bridge 2nd resistor ????????????????????
+	int		T0_deg = 25;		// Room Temp
+	int		T0_Coeff = 3950;	// Thermistor coefficient at room temp
+	float	K = 273.15;			// Kelvin convertion
+	//float   Vcc = 3.3;
+	float	Va;					// Analog Volt reading
+	float	Rfactor;			// Steinhart formula Value
+	float	RBase;				// Steinhart formula Value
+	float	steinhart;			// Steinhart formula Value
+	float	T;					// Temperature
+	float	R;					// Thermistor resistance
 
+	Va = (float) analogData;
+	R = (Va * Rs) / (1023 - Va);
+	Rfactor = R/R0;
+	RBase =  (1/(K+T0_deg));
+	steinhart = 1/(log(Rfactor) / T0_Coeff + RBase); 
+	T = steinhart - K;   
+
+	return T; 
+}
 
 //------------------------ P Z E M  --------------------------------------
 float getMeasure(char unit) {
-	int i = 0;
-	float r = -1.0;
+	byte 	i = 0;
+	float 	r = -1.0;
 
 	do {
 		debugln("pzem reading " + String(unit) + " attempt " + String(i));
@@ -114,26 +169,8 @@ float getMeasure(char unit) {
 	return r;
 }
 
-float sendMeasures(int sensor, char * units) {
-	unsigned int   	i;
-	char  			unit;
-	float 			measure;
-	float 			wattReturn	 = 0;
-
-	debugln("reading pzem #" + String(sensor));
-
-	for (i = 0; i < strlen(units); i++) {
-		unit = units[i];
-		measure = getMeasure(unit);
-		mqttSendValue("energy", sensor, unit, measure);
-		if (unit == 'W') {
-			wattReturn = measure;
-		}
-	}
-	return wattReturn;
-}
-
 void selectDevice(int channel) {
+
 	if (channel & 1) {
 		digitalWrite(ADDRESS_PIN1,HIGH);
 	} else {
@@ -149,61 +186,80 @@ void selectDevice(int channel) {
 	} else {
 		digitalWrite(ADDRESS_PIN3,LOW);
 	}
-	//delay(50);
+	delay(10);
 }
 
-//------------------------ T E M P E R A T U R E   --------------------------------------
+void readSensor() {
+	byte	sensor;
+	float	measure;
 
-int getAnalogReading(int samples) {
-	int analogData = 0;
+	for (sensor = 0; sensor < PZEM004T_COUNT; sensor++) {
+		flashLed();
+		selectDevice(sensor);						// Select the sensor
 
-	for(int i = 0; i < samples; i++) {
-		analogData += analogRead(A0);
-		delay(10);
+		if (sensor == 0) {
+			measure = getMeasure('V');			// Reading pzem Volt 
+			if (measure >= 0) {
+				volt.count++;
+				volt.measure = measure;
+				volt.sum += measure;
+			}
+		}
+		measure = getMeasure('W');				// Reading pzem Watt
+		if (measure >= 0) {
+			watt[sensor].count++;
+			watt[sensor].measure = measure;
+			watt[sensor].sum += measure;
+		}
+	}
+	
+	measure = getTemperature(getAnalogReading(4));
+	temp.count++;
+	temp.measure = measure;
+	temp.sum += measure;
+}
+
+void sendSensor() {
+	byte	sensor;
+	float	measure;
+
+	if (volt.count >= VOLT_AVG) {
+		measure = volt.sum / volt.count;
+		measure = round( measure * pow(10, VOLT_PRECISION) ) / pow(10, VOLT_PRECISION);
+		mqttCnx.sendSensor("sonde", 0, "V", measure);
+		volt.count	= 0;
+		volt.sum	= 0;
 	}
 
-	analogData = analogData / samples;
-	return analogData;
+	if (temp.count >= TEMP_AVG) {
+		measure = temp.sum / temp.count;
+		measure = round( measure * pow(10, TEMP_PRECISION) ) / pow(10, VOLT_PRECISION);
+		mqttCnx.sendSensor("temp", 0, "C", measure);
+		temp.count	= 0;
+		temp.sum	= 0;
+	}
+
+	for (sensor = 0; sensor < PZEM004T_COUNT; sensor++) {
+		if (watt[sensor].count >= WATT_AVG) {
+			measure = watt[sensor].sum / watt[sensor].count;
+			measure = round( measure * pow(10, WATT_PRECISION) ) / pow(10, WATT_PRECISION);
+			mqttCnx.sendSensor("sonde", sensor, "W", measure);
+			watt[sensor].count	= 0;
+			watt[sensor].sum	= 0;
+		}
+
+	}
 }
 
-float getTemperature(int analogData) {
-  
-  int     R0 = 10000;         // Thermistor resistance at room temp  ????????????????????
-  int     Rs = 110000;        // Bridge 2nd resistor ????????????????????
-  int     T0_deg = 25;        // Room Temp
-  int     T0_Coeff = 3950;    // Thermistor coefficient at room temp
-  float   K = 273.15;         // Kelvin convertion
-  //float   Vcc = 3.3;
-  float   Va;                 // Analog Volt reading
-  float   Rfactor;            // Steinhart formula Value
-  float   RBase;              // Steinhart formula Value
-  float   steinhart;          // Steinhart formula Value
-  float   T;                  // Temperature
-  float   R;                  // Thermistor resistance
-
-  Va = (float) analogData;
-  R = (Va * Rs) / (1023 - Va);
-
-  Rfactor = R/R0;
-  RBase =  (1/(K+T0_deg));
-  steinhart = 1/(log(Rfactor) / T0_Coeff + RBase); 
-
-  T = steinhart - K;   
-
-  return T; 
-
-}
 
 //------------------------ N E O   P I X E L  --------------------------------------
 Rgb convertToRgb(float watt) {
 
-	Rgb color;
-	int red;
-	int green;
-	int blue;
-
-	int iWatt;
-
+	Rgb		color;
+	int		red;
+	int		green;
+	int		blue;
+	int 	iWatt;
 
 	iWatt = (int) (watt); 
 
@@ -215,12 +271,11 @@ Rgb convertToRgb(float watt) {
 	if (iWatt > 912) {iWatt = (iWatt + 912) / 2;}   // 3500 -> 1024
 	if (iWatt > 1224) {iWatt = (iWatt + 1224) / 2;} // 6000 -> 1280
 													// 10096 -> 1536
-
 	red   = 30;
 	green = 30;
 	blue  = 30;
 
-	if (iWatt < 0) {     // PZEM return (-1) when read error.
+	if (iWatt < 0) {	// PZEM return (-1) when read error.
 		red   = 30;
 		green = 30;
 		blue  = 30;
@@ -230,7 +285,7 @@ Rgb convertToRgb(float watt) {
 		green = 30;
 		blue  = 0;
 	} 
-	if (iWatt > 0) {      // Dark Blue -> Blue
+	if (iWatt > 0) {	// Dark Blue -> Blue
 		red   = 0;
 		green = 0;
 		blue  = iWatt;
@@ -266,7 +321,6 @@ Rgb convertToRgb(float watt) {
 		blue  = 255;
 	} 
 
-
 	color.r = (byte) red;
 	color.g = (byte) green;
 	color.b = (byte) blue;
@@ -278,9 +332,9 @@ void setColor(int ledIndex, Rgb color) {
 }
 
 void initLed() {
-	Rgb   color;
-	int bright;
-	int led;
+	Rgb		color;
+	byte	bright;
+	byte	led;
 
 	color.r = 255;
 	color.g = 0;
@@ -301,50 +355,42 @@ void initLed() {
 		strip.show();
 		delay(50);
 	}
-  
+}
+
+void updateLed() {
+	byte	sensor;
+	Rgb		color;
+
+	// Setting the Watt corresponding color on the led 
+	for (sensor = 0; sensor < PZEM004T_COUNT; sensor++) {
+		color = convertToRgb(watt[sensor].measure);
+		setColor(sensor, color);
+	}
+		strip.show();
 }
 
 //------------------------ S E T U P --------------------------------------
 void setup() {
 
-    int     i = 0;
+	// SERIAL
+	Serial.begin(115200);
+	debugln("Starting " DEVICE_TYPE " " DEVICE_ID " v" VERSION);
 
-    // SERIAL
-    Serial.begin(115200);
-    debugln("Starting setup");
-
-    //PIN
-    pinMode(LED_BUILTIN, OUTPUT);                                           // set led pin as output
+	//PIN
+	pinMode(LED_BUILTIN, OUTPUT);										// set led pin as output
 	pinMode(ADDRESS_PIN1, OUTPUT);
 	pinMode(ADDRESS_PIN2, OUTPUT);
 	pinMode(ADDRESS_PIN3, OUTPUT);
-	digitalWrite(LED_BUILTIN, LOW);                                          // keep LED off
+	digitalWrite(LED_BUILTIN, LOW);										// keep LED off
 
-    // WIFI Connection
-    WiFi.begin(ssid, password);             // Connect to the network
-    debug(VERSION);
-    debug(" Connecting to ");
-    debug(ssid); 
-    debugln(" ...");
+	// WIFI Connection
+	wifiConnection(SECRET_WIFI_SSID, SECRET_WIFI_PASSWORD, DEVICE_TYPE DEVICE_ID);
+	mqttCnx.setDevice(DEVICE_TYPE, DEVICE_ID);
+	mqttCnx.setTime(SECRET_NTP_SERVERNAME, SECRET_NTP_TIMEZONE);
+	mqttCnx.setCacheExpire(120);
+	mqttCnx.start(WiFi.localIP(), WiFi.macAddress());
 
-    while (WiFi.status() != WL_CONNECTED) { // Wait (4min max) for the Wi-Fi to connect
-        delay(500);
-        debug(++i); 
-        debug(' ');
-        if (i > 500) {                      // Reboot if no wifi connection 
-            ESP.reset();
-        }
-    }
-
-
-    // Local IP Copy
-    String sLocalIp = String() + WiFi.localIP()[0] + "." + WiFi.localIP()[1] + "." + WiFi.localIP()[2] + "." + WiFi.localIP()[3];
-    strcpy(localIp,sLocalIp.c_str());
-
-    debugln('\n');
-    debugln("Connection established!");  
-    debug("IP address:\t");
-    debugln(localIp);         
+	mqttCnx.send("device", "version",  "node", VERSION);	
 
 	// Multiplexer
 	debugln("initiating multiplexer to 0 ");   
@@ -354,16 +400,8 @@ void setup() {
 	pzem.setAddress(ip);
 	delay(1000);
 
-	//MQTT
-    debugln("setting mqtt server to " + String(mqttServer));   
-    mqttCnx.setServer(mqttServer, 1883);                                      //Configuring MQTT server
-    mqttCnx.setCallback(mqttCallback);                                        //La fonction de callback qui est executée à chaque réception de message  
-    mqttCnx.disconnect();
-    mqttConnect();
-    mqttSend("IP", "started", localIp);										  // Send the IP address of the ESP8266 to the computer
-								
 	strip.begin();
-	strip.show(); // Initialize all pixels to 'off'                             
+	strip.show(); // Initialize all pixels to 'off'							
 	initLed();
 	strip.setBrightness(LED_BRIGHTNESS);
 
@@ -373,50 +411,18 @@ void setup() {
 
 void loop() {
 
-	int   	sensor;
-	int		analogValue = 0;
-	int		analogCount = 0;
-	float 	actualWatt;
-	float 	boardTemp;
-	Rgb   	color;
-	char  	Wunits[] = "W"; // VAWE = Volt-Ampere-Watt-Energy
-	char  	Vunits[] = "V";
-
-
-	for (sensor = 0; sensor < PZEM004T_COUNT; sensor++) {
-		// Select the sensor
-		selectDevice(sensor);
-
-		if (sensor == 0) {
-			// Reading pzem Volt and sending mqtt measure
-			sendMeasures(sensor, Vunits);
-		}
-
-		// Reading pzem watts and sending mqtt measure
-		actualWatt = sendMeasures(sensor, Wunits);
-
-		// Setting the Watt corresponding color on the led 
-		color = convertToRgb(actualWatt);
-		setColor(sensor, color);
-		strip.show();
-
-		// Temp reading
-		analogValue += getAnalogReading(4);
-		analogCount++;
-	}
-	// Mqtt Send
 	mqttCnx.loop();
-	mqttCnx.disconnect();
 
-	// Temp compute & send
-	analogValue = analogValue / analogCount;
-	boardTemp = getTemperature(analogValue);
-  	mqttSendValue("temp", 0, 'C', boardTemp);
+	// Reading pzem watts and sending mqtt measure
+	readSensor();
+	sendSensor();
+	updateLed();
 
 	// If Wifi lost then reset the ESP
 	if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Wifi connexion lost : Rebooting ESP");
+		Serial.println("Wifi connexion lost : Rebooting ESP");
 		delay(5000);
-		ESP.reset();
+		ESP.restart();
 	}
+	delay(150);
 }
